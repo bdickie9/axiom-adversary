@@ -3,13 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from hashlib import sha256
 import json
-import time
 from typing import Any
 
 
 def _digest(obj: dict[str, Any]) -> str:
     blob = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return sha256(blob.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class DemandProof:
+    observation_id: str
+    seat: dict[str, str]
+    ts: float
+    prev_hash: str | None = None
+
+    def digest(self) -> str:
+        return _digest(asdict(self))
 
 
 @dataclass(frozen=True)
@@ -21,6 +31,7 @@ class SettlementProof:
     product: str
     seat: dict[str, str]
     ts: float
+    demand_hash: str | None = None
     prev_hash: str | None = None
 
     def digest(self) -> str:
@@ -39,9 +50,32 @@ class BountyProof:
 
 
 @dataclass(frozen=True)
+class RefusalProof:
+    attempted: str
+    reason: str
+    external_ref: str | None
+    ts: float
+    prev_hash: str | None = None
+
+    def digest(self) -> str:
+        return _digest(asdict(self))
+
+
+@dataclass(frozen=True)
+class RefundRecord:
+    refund_id: str
+    charge_id: str
+    amount: int
+    ts: float
+
+    def digest(self) -> str:
+        return _digest(asdict(self))
+
+
+@dataclass(frozen=True)
 class FailureArtifact:
     settlement_hash: str
-    invariant: str  # e.g. "refund_not_reflected", "stale_demand", "missing_refusal"
+    invariant: str
     evidence: dict[str, Any]
     claimed_at: float
 
