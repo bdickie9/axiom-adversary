@@ -17,10 +17,21 @@ Autonomous systems that touch real money invent private records of success. Thos
 
 ## Integration
 
-Drop the webhook handler into an existing FastAPI service (e.g. MIDAS) after signature verification. Or run this as a thin sidecar that receives already-verified events.
+The example HTTP endpoint verifies the raw request body with Stripe's SDK and
+`STRIPE_WEBHOOK_SECRET`. Missing configuration returns 503; invalid or expired
+signatures return 400. Set the secret through the hosting environment, never in git.
+Internal integrations may call `on_settlement` only after signature verification.
+
+Repeated event IDs return the original bounty within one process; conflicting
+payloads are rejected. The reserve cannot exceed the payment amount. This is an
+in-memory reference: event deduplication does not survive restarts or coordinate
+multiple workers. Production requires durable transactions and unique event IDs.
 
 See `src/axiom_adversary/` for the core types and `app/main.py` for the example service.
 
 ## Status
 
 Design + reference implementation. Live settlement requires a verified Stripe webhook on a production host. Current MIDAS host returns 402 (deployment disabled).
+
+Offline tests: `PYTHONPATH=src:. python -m pytest -q tests` (install `pytest` and
+`httpx` alongside `requirements.txt`). Tests use synthetic signatures and no payments.

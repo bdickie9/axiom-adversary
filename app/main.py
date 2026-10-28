@@ -1,11 +1,13 @@
 """
-Example FastAPI service that receives already-verified Stripe events
-and emits BountyProofs.
-
-In production, signature verification happens before this handler.
+Example FastAPI service that verifies Stripe signatures before recording events.
+In-memory proof storage is for local evaluation, not production settlement.
 """
 
-from fastapi import FastAPI, HTTPException
+import os
+import json
+import stripe
+
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Any
 
@@ -27,11 +29,19 @@ def health() -> dict[str, str]:
 
 
 @app.post("/webhooks/stripe")
-def stripe_webhook(event: dict[str, Any]) -> dict[str, Any]:
-    """
-    Expects an already-verified event. In MIDAS this runs after
-    webhook_verify.py succeeds.
-    """
+async def stripe_webhook(request: Request) -> dict[str, Any]:
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Webhook verification is not configured")
+    try:
+        payload = await request.body()
+        stripe.Webhook.construct_event(
+            payload, request.headers.get("stripe-signature", ""), secret, tolerance=300
+        )
+        # Keep the engine independent of SDK resource-object versions.
+        event = json.loads(payload)
+    except (ValueError, stripe.SignatureVerificationError):
+        raise HTTPException(status_code=400, detail="Invalid webhook signature or payload")
     try:
         # Extract session / product / seat from metadata in a real integration.
         data = event.get("data", {}).get("object", {})
@@ -49,8 +59,8 @@ def stripe_webhook(event: dict[str, Any]) -> dict[str, Any]:
             memory=memory,
         )
         return {"bounty_hash": bounty.digest(), "reserved_cents": bounty.reserved_cents}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid settlement event")
 
 
 @app.post("/claims")
