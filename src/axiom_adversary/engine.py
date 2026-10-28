@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import time
+import json
+import math
+import threading
 from typing import Any
 
 from .proofs import (
@@ -22,6 +25,8 @@ class SettlementMemory:
         self.demands: list[DemandProof] = []
         self.refusals: list[RefusalProof] = []
         self.refunds: list[RefundRecord] = []
+        self._settlement_lock = threading.RLock()
+        self._processed_events: dict[str, tuple[str, BountyProof]] = {}
 
     def head_hash(self) -> str | None:
         return self.proofs[-1].digest() if self.proofs else None
@@ -42,7 +47,7 @@ class SettlementMemory:
         self.refunds.append(refund)
 
 
-def on_settlement(
+def _record_settlement(
     event: dict[str, Any],
     *,
     session_id: str,
@@ -58,12 +63,28 @@ def on_settlement(
         raise ValueError("unsupported event type")
 
     data = event.get("data", {}).get("object", {})
-    if data.get("payment_status") != "paid" and event.get("type") != "invoice.paid":
+    if event["type"] == "checkout.session.completed" and data.get("payment_status") != "paid":
+        raise ValueError("not paid")
+    if event["type"] == "invoice.paid" and (data.get("paid") is not True or data.get("status") != "paid"):
         raise ValueError("not paid")
 
-    amount = int(data.get("amount_total") or data.get("amount_paid") or 0)
-    if amount <= 0:
-        raise ValueError("zero amount")
+    amount = data.get("amount_total") if event["type"] == "checkout.session.completed" else data.get("amount_paid")
+    if type(amount) is not int or amount <= 0:
+        raise ValueError("invalid amount")
+    if not isinstance(event.get("id"), str) or not event["id"]:
+        raise ValueError("missing event identity")
+    if not isinstance(session_id, str) or not session_id or data.get("id") != session_id:
+        raise ValueError("object identity mismatch")
+    if type(reserve_fraction) not in (int, float) or not math.isfinite(reserve_fraction) or not 0 <= reserve_fraction <= 1:
+        raise ValueError("invalid reserve fraction")
+    if type(min_reserve_cents) is not int or min_reserve_cents < 0:
+        raise ValueError("invalid minimum reserve")
+    fingerprint = json.dumps([event, session_id, product, seat, demand_hash, reserve_fraction, min_reserve_cents], sort_keys=True, allow_nan=False)
+    previous = memory._processed_events.get(event["id"])
+    if previous:
+        if previous[0] != fingerprint:
+            raise ValueError("event identity conflict")
+        return previous[1]
 
     proof = SettlementProof(
         event_id=event["id"],
@@ -78,7 +99,7 @@ def on_settlement(
     )
     memory.append(proof)
 
-    reserved = max(min_reserve_cents, int(amount * reserve_fraction))
+    reserved = min(amount, max(min_reserve_cents, int(amount * reserve_fraction)))
     bounty = BountyProof(
         settlement_hash=proof.digest(),
         reserved_cents=reserved,
@@ -86,7 +107,25 @@ def on_settlement(
         prev_hash=proof.prev_hash,
     )
     memory.bounties.append(bounty)
+    memory._processed_events[event["id"]] = (fingerprint, bounty)
     return bounty
+
+
+def on_settlement(
+    event: dict[str, Any], *, session_id: str, product: str,
+    seat: dict[str, str], memory: SettlementMemory, demand_hash: str | None = None,
+    reserve_fraction: float = 0.05, min_reserve_cents: int = 500,
+) -> BountyProof:
+    """Record a verified event once within this in-memory instance.
+
+    Production requires signature verification and a durable transaction with
+    a unique event identity. This lock only coordinates callers in one process.
+    """
+    with memory._settlement_lock:
+        return _record_settlement(
+            event, session_id=session_id, product=product, seat=seat, memory=memory,
+            demand_hash=demand_hash, reserve_fraction=reserve_fraction, min_reserve_cents=min_reserve_cents,
+        )
 
 
 def _find_settlement(memory: SettlementMemory, digest: str) -> SettlementProof | None:
